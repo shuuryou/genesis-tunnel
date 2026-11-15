@@ -1,0 +1,125 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>GenesisTunnel</RootNamespace>
+    <AssemblyName>GenesisTunnel</AssemblyName>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <BuildStamp>$([System.DateTime]::Now.ToString("HHmm"))</BuildStamp>
+    <BuildDays>$([System.Math]::Floor($([System.DateTime]::Now.Subtract($([System.DateTime]::new(2000,1,1))).TotalDays)))</BuildDays>
+    <Version>1.0.$(BuildDays).$([System.Int32]::Parse($(BuildStamp)))</Version>
+    <AssemblyVersion>$(Version)</AssemblyVersion>
+    <FileVersion>$(Version)</FileVersion>
+    <InformationalVersion>$(Version)</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <Product>3D Genesis Tunnel (OpenGL)</Product>
+    <AssemblyTitle>3D Genesis Tunnel (OpenGL)</AssemblyTitle>
+    <Description>3D Genesis Tunnel (OpenGL)</Description>
+    <Company>Shuuryou</Company>
+    <Copyright>Screen saver code copyright © Shuuryou. Project Genesis data copyright © Barna Buza, Gergely Szelei-Kis, Zoltán Szabó, Márton Ekler, István Major, László Vincze, Mátyás Terstyánszky.</Copyright>
+    <NeutralLanguage>en-US</NeutralLanguage>
+    <ApplicationIcon>Data\screensaver.ico</ApplicationIcon>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Raylib-cs" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Update="ConfigForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="ConfigForm.Designer.cs">
+      <DependentUpon>ConfigForm.cs</DependentUpon>
+    </Compile>
+    <EmbeddedResource Update="ConfigForm.resx">
+      <DependentUpon>ConfigForm.cs</DependentUpon>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Data\genesis.bin" LogicalName="genesis.bin" />
+  </ItemGroup>
+
+  <!-- The Screen Saver control panel lists a .scr by string resource #1 (what scrnsave.lib
+       screen savers carry), not by the version info, and falls back to the bare file name.
+       Add it to the apphost. This has to happen before the single-file bundler appends the
+       payload: rewriting resources afterwards would cut the payload off. -->
+  <UsingTask TaskName="SetScrDescription" TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <File ParameterType="System.String" Required="true" />
+      <Description ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System" />
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Text" />
+      <Using Namespace="System.Runtime.InteropServices" />
+      <Code Type="Class" Language="cs"><![CDATA[
+using System;
+using System.IO;
+using System.Text;
+using System.Runtime.InteropServices;
+using Microsoft.Build.Utilities;
+
+public class SetScrDescription : Task
+{
+    [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr BeginUpdateResource(string file, bool deleteExisting);
+    [DllImport("kernel32", SetLastError = true)]
+    static extern bool UpdateResource(IntPtr h, IntPtr type, IntPtr name, ushort lang, byte[] data, uint size);
+    [DllImport("kernel32", SetLastError = true)]
+    static extern bool EndUpdateResource(IntPtr h, bool discard);
+
+    public string File { get; set; }
+    public string Description { get; set; }
+
+    public override bool Execute()
+    {
+        // RT_STRING block 1 holds string IDs 0-15; ID 1 is the description.
+        var ms = new MemoryStream();
+        var w = new BinaryWriter(ms);
+        w.Write((ushort)0);                          // ID 0: empty
+        w.Write((ushort)Description.Length);         // ID 1: description
+        w.Write(Encoding.Unicode.GetBytes(Description));
+        for (int i = 2; i < 16; i++) w.Write((ushort)0);
+        byte[] data = ms.ToArray();
+
+        IntPtr h = BeginUpdateResource(File, false);
+        if (h == IntPtr.Zero) { Log.LogError("BeginUpdateResource failed: " + Marshal.GetLastWin32Error()); return false; }
+        bool ok = UpdateResource(h, (IntPtr)6, (IntPtr)1, 0, data, (uint)data.Length);
+        if (!ok) Log.LogError("UpdateResource failed: " + Marshal.GetLastWin32Error());
+        if (!EndUpdateResource(h, !ok)) { Log.LogError("EndUpdateResource failed: " + Marshal.GetLastWin32Error()); return false; }
+        return ok;
+    }
+}
+]]></Code>
+    </Task>
+  </UsingTask>
+
+  <Target Name="ScrDescription" AfterTargets="_CreateAppHost" Condition="Exists('$(AppHostIntermediatePath)')">
+    <SetScrDescription File="$(AppHostIntermediatePath)" Description="$(AssemblyTitle)" />
+  </Target>
+
+  <Target Name="MakeScr" AfterTargets="Publish">
+    <Copy SourceFiles="$(PublishDir)$(AssemblyName).exe" DestinationFiles="$(PublishDir)$(AssemblyName).scr" />
+    <Delete Files="$(PublishDir)$(AssemblyName).exe" />
+  </Target>
+
+</Project>
