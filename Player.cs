@@ -84,6 +84,31 @@ sealed class Player
 
     public bool ShaderOk => shader.Id != 0 && locDiffuse >= 0;
 
+    public void Unload()
+    {
+        // Program.cs builds a new Player whenever the picture size changes, which
+        // while a window edge is being dragged is every frame. This resulted in
+        // a memory leak, because there is no garbage collection in Raylib. The
+        // render targets alone are tens of megabytes of video memory each. Section
+        // meshes are not touched, because they belong to the sections and stay
+        // valid for the next Player.
+        Raylib.UnloadRenderTexture(frame);
+
+        foreach (RenderTexture2D shot in shots)
+            if (shot.Id != 0) Raylib.UnloadRenderTexture(shot);
+
+        foreach (Texture2D tex in materialTextures.Values)
+            if (tex.Id != white.Id) Raylib.UnloadTexture(tex);
+
+        materialTextures.Clear();
+        Raylib.UnloadTexture(white);
+        Raylib.UnloadShader(shader);
+
+        // Not UnloadMaterial: that would also delete the shader and whichever
+        // texture was drawn last, both of which were released above.
+        unsafe { Raylib.MemFree(material.Maps); }
+    }
+
     Texture2D MaterialTexture(int number)
     {
         // TexGen output is cached by TextureDef, and this GPU texture is cached by

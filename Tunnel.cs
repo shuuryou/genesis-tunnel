@@ -335,10 +335,9 @@ sealed class Tunnel
     double wishedUpTo;
     readonly Random wishRng;
 
-    // A suicide/crash temporarily steers PathAt away from the safe route.
-    double crashAt = -1;
-    Vector2 crashPoint;
-    const float CrashRunUp = 12f;
+    // Where the route had to be forced through a section no safe route could cross.
+    // A negative forcedTo means the route ahead is safe throughout.
+    double forcedFrom, forcedTo = -1;
 
     public Tunnel(Kit kit, Settings cfg, int seed)
     {
@@ -380,7 +379,12 @@ sealed class Tunnel
 
         foreach (int k in chunks.Keys.Where(k => k < camChunk - 1).ToList())
         {
-            Dropped.Add(chunks[k]);
+            // Only a section the renderer has uploaded needs handing back. Queuing the
+            // others would keep their grids and vertex arrays alive until the next
+            // rendered frame.
+            if (chunks[k].Gpu != null)
+                Dropped.Add(chunks[k]);
+
             chunks.Remove(k);
         }
 
@@ -458,17 +462,30 @@ sealed class Tunnel
         // dictionary before the next attempt, and later attempts contain fewer pipes.
         int k = lastChunk + 1;
         Chunk chunk = null;
-        for (int attempt = 0; attempt < 5; attempt++)
+        bool planned = false;
+
+        for (int attempt = 0; attempt < 5 && !planned; attempt++)
         {
             chunk = attempt == 0 && nextBuild != null ? nextBuild.Result : Build(k, attempt, lanes);
             chunks[k] = chunk;
             // A section is only accepted if the camera can get through it. If not, it
             // is built again with fewer pipes.
-            if (PlanRoute(k)) break;
+            planned = PlanRoute(k);
         }
+
+        // Even the most bare section can be impossible to pass, because the frozen route
+        // may already have committed to a gap that closes. The route must still go on
+        // though. Without a route, every later section would start to plan from the same
+        // dead end over a longer and longer growing stretch, and no crash could get
+        // out of it.
+        if (!planned)
+            ForceRoute(k); // Doomed will later turn the collision into a crash.
+
         lanes = chunk.LanesOut;
         lastChunk = k;
-        if (chunk.FlyThrough is var (from, to, x, y)) flyThroughs.Add((from, to, x, y));
+
+        if (chunk.FlyThrough is var (from, to, x, y))
+            flyThroughs.Add((from, to, x, y));
 
         MakeWishes(k);
         Bend(chunk);
@@ -590,8 +607,9 @@ sealed class Tunnel
             var pipe = new Soup();
             Shapes.Tube(pipe, 1, Shapes.Line(new Vector3(lane.X, lane.Y, -19), new Vector3(lane.X, lane.Y, 19)), lane.R, perLength: 9.5f);
 
-            // Hexagonal collars here and there, as on the original pipes.
-            for (int i = rng.Next(3); i > 0; i--)
+            // Hexagonal collars here and there, as on the original pipes. Not on the
+            // last-resort section: a collar can close the one gap the route is in.
+            for (int i = bare ? 0 : rng.Next(3); i > 0; i--)
                 pipe.Append(kit.Collar, Place.Along(new Vector3(lane.X, lane.Y, Between(rng, -17, 17)), Vector3.UnitZ, lane.R / 0.5f));
             Commit(chunk, pipe);
         }
@@ -599,7 +617,7 @@ sealed class Tunnel
         foreach (Lane lane in ending)
             Commit(chunk, LaneEnd(chunk, lane, rng, false));
 
-        foreach (Lane lane in starting) 
+        foreach (Lane lane in starting)
             Commit(chunk, LaneEnd(chunk, lane, rng, true));
 
         if (bare)
@@ -822,9 +840,9 @@ sealed class Tunnel
         // Every vertex samples the center line at its own Z. Store positions relative
         // to the section anchor and normals in the same local frame; absolute world
         // positions stay in doubles until Player subtracts the camera.
-        
+
         double s0 = (chunk.Number * ChunkLength) + Kit.HalfLength; // where the section's Z = 0 lies
-        
+
         line.Sample(s0, out chunk.Anchor, out _);
 
         foreach (var (material, list) in new[] { (1, chunk.Soup.Paint), (7, chunk.Soup.Plate) })
@@ -877,8 +895,10 @@ sealed class Tunnel
         return c.Grid.Blocked[(slice % Grid.NZ * Grid.NX * Grid.NY) + cell] != 0;
     }
 
-    bool PlanRoute(int newestChunk)
+    bool PlanRoute(int newestChunk, bool force = false)
     {
+        // With force, clearance and surfaces stop being forbidden and become
+        // expensive instead, so a route always exists. It avoids what it can.
         // Seed the first slice either from the existing frozen endpoint or from all
         // open cells. Later slices retain only their cheapest predecessor, and the
         // final route is recovered by following the packed move indices backwards.
@@ -908,7 +928,7 @@ sealed class Tunnel
         const float never = float.MaxValue;
 
         for (int c = 0; c < cells; c++)
-            prev[c] = startCell >= 0 ? (c == startCell ? 0 : never) : (BlockedAt(start, c) ? never : Price(start, c));
+            prev[c] = startCell >= 0 ? (c == startCell ? 0 : never) : (BlockedAt(start, c) && !force ? never : Price(start, c));
 
         for (int i = 1; i < count; i++)
         {
@@ -926,7 +946,7 @@ sealed class Tunnel
                     int c = (iy * Grid.NX) + ix;
                     cur[c] = never;
 
-                    if (chunk == null || chunk.Grid.Blocked[sliceBase + c] != 0)
+                    if (chunk == null || (!force && chunk.Grid.Blocked[sliceBase + c] != 0))
                         continue;
 
                     float best = never;
@@ -957,7 +977,10 @@ sealed class Tunnel
 
                     if (best == never)
                         continue;
-                    
+
+                    if (force)
+                        best += chunk.Grid.Solid[sliceBase + c] != 0 ? 60f : chunk.Grid.Blocked[sliceBase + c] != 0 ? 2f : 0f;
+
                     float dx = Grid.X(ix) - wx, dy = Grid.Y(iy) - wy;
                     cur[c] = best + (pull * ((dx * dx) + (dy * dy)));
                     back[(i * cells) + c] = (sbyte)bestMove;
@@ -993,6 +1016,45 @@ sealed class Tunnel
         // Everything except the newest section is now final.
         settled = Math.Max(start, (newestChunk * Grid.NZ) - 1);
         return true;
+    }
+
+    void ForceRoute(int newestChunk)
+    {
+        double from = SliceS(route.Count == 0 ? routeFirst : Math.Max(settled, routeFirst));
+
+        if (!PlanRoute(newestChunk, force: true))
+            return;
+
+        if (forcedTo < 0) forcedFrom = from;
+        forcedTo = (newestChunk + 1) * (double)ChunkLength;
+    }
+
+    public bool Doomed(double cameraS, double reach, out double crashS)
+    {
+        // Only a forced stretch can run into something, so the glide path is checked
+        // only there. The impact has to lie in the frozen part of the route: the
+        // newest section may still be re-planned, and with luck that finds a way.
+        crashS = -1;
+
+        if (forcedTo < 0)
+            return false;
+
+        if (cameraS > forcedTo + reach)
+        {
+            forcedTo = -1;
+            return false;
+        }
+
+        double until = Math.Min(Math.Min(cameraS + 40, forcedTo + reach), SliceS(settled) - reach);
+
+        for (double t = Math.Max(cameraS + 0.5, forcedFrom - reach); t <= until; t += 0.25)
+            if (SolidAt(t, PathAt(t, reach)))
+            {
+                crashS = t;
+                return true;
+            }
+
+        return false;
     }
 
     // First-slice cost uses the same wish field as every later cell.
@@ -1101,7 +1163,8 @@ sealed class Tunnel
     {
         // Raised-cosine smoothing removes cell steps without introducing the large
         // overshoot a spline could produce near pipes. Missing old/new slices clamp
-        // to the available route, then an active crash blends towards its target.
+        // to the available route. A crash needs no special case here: PlanCrash
+        // rewrites the raw route, and the camera glides along it as it always does.
         Vector2 sum = Vector2.Zero;
 
         float total = 0;
@@ -1120,17 +1183,7 @@ sealed class Tunnel
             total += w;
         }
 
-        Vector2 p = total > 0 ? sum / total : route[Math.Clamp((int)(s / Grid.Slice) - routeFirst, 0, route.Count - 1)];
-
-        if (crashAt >= 0 && s > crashAt - CrashRunUp)
-        {
-            // On a suicide course: leave the safe route and kamikaze into the chosen spot.
-            float t = (float)Math.Clamp((s - (crashAt - CrashRunUp)) / CrashRunUp, 0, 1);
-            t = t * t * (3 - (2 * t));
-            p += (crashPoint - p) * t;
-        }
-
-        return p;
+        return total > 0 ? sum / total : route[Math.Clamp((int)(s / Grid.Slice) - routeFirst, 0, route.Count - 1)];
     }
 
     // Outside the cross-section counts as solid; outside built sections is unknown/free
@@ -1144,7 +1197,7 @@ sealed class Tunnel
     }
 
     // Crash targets use Solid, not the inflated Blocked margin: the intent is to hit
-    // the visible surface after a run-up that was checked for premature collisions.
+    // the visible surface, not the clearance around it.
     bool SolidAt(double s, Vector2 p)
     {
         int slice = (int)Math.Floor(s / Grid.Slice);
@@ -1154,62 +1207,182 @@ sealed class Tunnel
         return c.Grid.Solid[Grid.Index(ix, iy, slice % Grid.NZ)] != 0;
     }
 
-    public bool PlanCrash(double fromS, Random rng, out double crashS)
+    public bool PlanCrash(double cameraS, double reach, Random rng, out double crashS)
     {
-        // Search only planned, not-yet-settled slices with a nearby surface. Temporarily
-        // install each candidate in crashAt so PathAt describes the actual run-up,
-        // then reject it if that run-up hits something before the white-out.
+        // A crash is a route like any other, except that it ends in a pipe. The raw
+        // route is re-planned from just beyond the stretch the camera is averaging
+        // right now, drifts over to a surface some way ahead under the planner's usual
+        // limit on sideways steps, and then stays on that line. The camera follows
+        // with its ordinary glide, so there is no separate steering to blend in.
+        // crashS is where that glide path first touches something solid.
         crashS = -1;
+        int reachSlices = (int)Math.Ceiling(reach / Grid.Slice);
+        int first = (int)Math.Floor(cameraS / Grid.Slice) + reachSlices + 2;
+
+        if (first < routeFirst || first - routeFirst >= route.Count)
+            return false;
+
+        Vector2 from = route[first - routeFirst];
+        int fromCell = (Grid.IY(from.Y) * Grid.NX) + Grid.IX(from.X);
 
         for (int tries = 0; tries < 12; tries++)
         {
-            double s = fromS + (rng.NextDouble() * 25);
-            int slice = (int)Math.Floor(s / Grid.Slice);
+            // arrive: the raw route reaches the line through the target. impact: one
+            // reach later, where the gliding camera has fully settled on that line.
+            // last: the route is held a little longer so the average there is clean.
+            int run = (int)((24 + (rng.NextDouble() * 22)) / Grid.Slice);
+            int arrive = first + run, impact = arrive + reachSlices, last = impact + reachSlices + 4;
 
-            if (slice >= settled - 20 || !chunks.TryGetValue(slice / Grid.NZ, out Chunk c))
+            // Stay inside the frozen part of the route; the newest section may be re-planned.
+            if (last >= settled || last - routeFirst >= route.Count || !chunks.TryGetValue(impact / Grid.NZ, out Chunk c))
                 continue;
 
-            Vector2 here = PathAt(s);
-
-            // The nearest surface in this slice.
+            // The nearest pipe surface to where the safe route would have passed. The
+            // outermost cells are the walls, floor and ceiling, which do not count.
+            Vector2 here = route[impact - routeFirst];
             float best = float.MaxValue;
-            Vector2 target = default;
-            int iz = slice % Grid.NZ;
+            int targetCell = -1;
+            int iz = impact % Grid.NZ;
 
-            for (int iy = 0; iy < Grid.NY; iy++)
-                for (int ix = 0; ix < Grid.NX; ix++)
+            for (int iy = 2; iy < Grid.NY - 2; iy++)
+                for (int ix = 2; ix < Grid.NX - 2; ix++)
                 {
                     if (c.Grid.Solid[Grid.Index(ix, iy, iz)] == 0)
                         continue;
 
-                    var cell = new Vector2(Grid.X(ix), Grid.Y(iy));
-                    float d = Vector2.Distance(cell, here);
+                    float d = Vector2.Distance(new Vector2(Grid.X(ix), Grid.Y(iy)), here);
 
                     if (d < best)
                     {
                         best = d;
-                        target = cell;
+                        targetCell = (iy * Grid.NX) + ix;
                     }
                 }
 
             if (best > 3.2f)
                 continue;
 
-            // The run-up must not clip anything else on the way.
-            crashAt = s;
-            crashPoint = target;
-            bool clear = true;
-            for (double t = s - CrashRunUp; t < s - 1.0 && clear; t += 0.25)
-                if (SolidAt(t, PathAt(t))) clear = false;
-            if (clear)
-            {
-                crashS = s;
-                return true;
-            }
-            crashAt = -1;
+            Vector2[] approach = Approach(first, fromCell, arrive, targetCell);
+
+            if (approach == null)
+                continue;
+
+            var target = new Vector2(Grid.X(targetCell % Grid.NX), Grid.Y(targetCell / Grid.NX));
+            int at = first - routeFirst, count = last - first + 1;
+            List<Vector2> safe = route.GetRange(at, count);
+
+            for (int i = 0; i < count; i++)
+                route[at + i] = i < approach.Length ? approach[i] : target;
+
+            // Usually that is the target, but anything the glide path clips on the way
+            // is just as good a crash.
+            for (double t = cameraS + 2; t <= SliceS(impact) + 1; t += 0.25)
+                if (SolidAt(t, PathAt(t, reach)))
+                {
+                    crashS = t;
+                    return true;
+                }
+
+            // The glide path missed everything. Put the safe route back.
+            for (int i = 0; i < count; i++)
+                route[at + i] = safe[i];
         }
 
         return false;
+    }
+
+    Vector2[] Approach(int first, int fromCell, int arrive, int targetCell)
+    {
+        // The same dynamic programme as PlanRoute, with three differences: it ends in
+        // one given cell, the wish is a soft line from the start to that cell, and
+        // surfaces and their clearance are expensive rather than forbidden. The route
+        // therefore still goes around whatever stands between it and its target.
+        const int cells = Grid.NX * Grid.NY;
+        const float never = float.MaxValue;
+        int count = arrive - first + 1;
+
+        var back = new sbyte[count * cells];
+        var prev = new float[cells];
+        var cur = new float[cells];
+        Array.Fill(prev, never);
+        prev[fromCell] = 0;
+
+        var p0 = new Vector2(Grid.X(fromCell % Grid.NX), Grid.Y(fromCell / Grid.NX));
+        var p1 = new Vector2(Grid.X(targetCell % Grid.NX), Grid.Y(targetCell / Grid.NX));
+
+        for (int i = 1; i < count; i++)
+        {
+            int slice = first + i;
+
+            if (!chunks.TryGetValue(slice / Grid.NZ, out Chunk chunk))
+                return null;
+
+            int sliceBase = slice % Grid.NZ * cells;
+            float t = (float)i / (count - 1);
+            Vector2 wish = Vector2.Lerp(p0, p1, t * t * (3 - (2 * t)));
+
+            for (int iy = 0; iy < Grid.NY; iy++)
+                for (int ix = 0; ix < Grid.NX; ix++)
+                {
+                    int c = (iy * Grid.NX) + ix;
+                    cur[c] = never;
+
+                    float best = never;
+                    int bestMove = 0;
+
+                    for (int m = (slice & 1) == 0 ? 0 : 4; m < ((slice & 1) == 0 ? 9 : 5); m++)
+                    {
+                        int px = ix + (m % 3) - 1, py = iy + (m / 3) - 1;
+
+                        if (px < 0 || px >= Grid.NX || py < 0 || py >= Grid.NY)
+                            continue;
+
+                        float cost = prev[(py * Grid.NX) + px];
+
+                        if (cost == never)
+                            continue;
+
+                        if (m != 4)
+                            cost += (m % 2 == 0) ? 0.30f : 0.15f;
+
+                        if (cost < best)
+                        {
+                            best = cost;
+                            bestMove = m;
+                        }
+                    }
+
+                    if (best == never)
+                        continue;
+
+                    float obstacle = chunk.Grid.Solid[sliceBase + c] != 0 ? 40f : chunk.Grid.Blocked[sliceBase + c] != 0 ? 0.3f : 0f;
+                    cur[c] = best + obstacle + (0.3f * Vector2.DistanceSquared(new Vector2(Grid.X(ix), Grid.Y(iy)), wish));
+                    back[(i * cells) + c] = (sbyte)bestMove;
+                }
+
+            (prev, cur) = (cur, prev);
+        }
+
+        // Too far sideways to reach with the allowed steps.
+        if (prev[targetCell] == never)
+            return null;
+
+        var found = new Vector2[count];
+        int cell = targetCell;
+
+        for (int i = count - 1; i >= 0; i--)
+        {
+            int ix = cell % Grid.NX, iy = cell / Grid.NX;
+            found[i] = new Vector2(Grid.X(ix), Grid.Y(iy));
+
+            if (i == 0)
+                break;
+
+            int m = back[(i * cells) + cell];
+            cell = ((iy + (m / 3) - 1) * Grid.NX) + ix + (m % 3) - 1;
+        }
+
+        return found;
     }
 
     public double Restart(double cameraS)
@@ -1218,7 +1391,6 @@ sealed class Tunnel
         // the impact geometry is gone. Replan all retained/new sections as one path,
         // then freeze everything up to the latest section.
 
-        crashAt = -1;
         int k = (int)(cameraS / ChunkLength) + 2;
 
         while (lastChunk < k + 2)
@@ -1227,14 +1399,15 @@ sealed class Tunnel
         route.Clear();
         routeFirst = k * Grid.NZ;
         settled = -1;
-        PlanRoute(lastChunk);
+        forcedTo = -1;
+        if (!PlanRoute(lastChunk)) ForceRoute(lastChunk);
         settled = (lastChunk * Grid.NZ) - 1;
         return (k * ChunkLength) + 0.5;
     }
 }
 
 // Shared CPU renderer for /map and the in-flight overlay. It visualizes grid state
-// and the unsmoothed planner path, making clearance and crash-steering visible.
+// and the unsmoothed planner path, making clearance and crash routes visible.
 static class TunnelDebug
 {
     public static byte[] Picture(Func<int, int, int, int> cellState, Func<int, Vector2> route, int firstSlice, int slices, int cameraSlice, out int w, out int h)

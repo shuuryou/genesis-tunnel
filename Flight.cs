@@ -120,7 +120,8 @@ sealed class Flight
     float warpIn, warpTime = -1, warpLength;
     int warpKind;
 
-    // crashS is planned ahead so the route has room to steer into the surface.
+    // crashS is where the re-planned route first touches a surface. It lies a few
+    // seconds ahead, because the route drifts into the pipe instead of swerving.
     float crashIn;
     double crashS = -1; // where the planned crash happens (-1 = none planned)
 
@@ -297,15 +298,18 @@ sealed class Flight
         speed = Ease(speed, wanted, warpTime >= 0 ? 2.5f : 0.8f, dt);
         S += speed * dt;
 
-        // A planned suicide/crash temporarily overrides route following and the look
-        // direction. The restart happens only once the white frame hides the cut.
+        // A planned suicide/crash is already part of the route. Here it only turns the
+        // look direction and fades to white. The restart happens once the white frame
+        // hides the cut.
         float white = 0, crashSteer = 0;
 
         if (crashS >= 0)
         {
             double left = crashS - 0.35 - S;
             white = Smooth(1 - (float)(left / (speed * 0.26f)));
-            crashSteer = Smooth(1 - (float)(left / 12.0));
+            // Turn the view towards the direction of travel over the last second or
+            // so, measured in time so that a fast flight does not snap its head round.
+            crashSteer = Smooth(1 - (float)(left / MathF.Max(12f, speed * 1.2f)));
 
             if (left <= 0)
             {
@@ -329,15 +333,24 @@ sealed class Flight
         }
         else if (warpTime < 0 && (crashIn -= dt) <= 0)
         {
-            if (!tunnel.PlanCrash(S + MathF.Max(30, speed * 2f), rng, out crashS))
+            // The tunnel re-plans the route ahead so that it ends in a pipe. Nothing
+            // changes within the stretch that is currently averaged into the camera.
+            if (!tunnel.PlanCrash(S, glide, rng, out crashS))
                 crashIn = 1.5f; // nothing to hit there; try again soon
         }
+
+        // Where the tunnel found no way through a section, the route goes into a
+        // surface whether the autopilot is depressed or not. Same ending.
+        if (crashS < 0 && tunnel.Doomed(S, glide, out double hit))
+            crashS = hit;
 
         tunnel.Update(S);
 
         // Average a longer stretch of route at speed. This keeps a swerve's duration
         // roughly constant instead of turning high speed into a camera twitch.
-        glide = Ease(glide, Math.Clamp(speed * 0.32f, 8f, 16f), 1.5f, dt);
+        // On a crash course the reach stays as it was when the impact was worked out,
+        // so the camera meets the surface exactly where the plan says it does.
+        if (crashS < 0) glide = Ease(glide, Math.Clamp(speed * 0.32f, 8f, 16f), 1.5f, dt);
         Vector2 across = tunnel.PathAt(S, glide);
         Across = across;
         V3d eye = tunnel.World(S, across.X, across.Y);

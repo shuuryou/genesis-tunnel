@@ -24,9 +24,9 @@ public partial class ConfigForm : Form
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        
+
         using var form = new ConfigForm();
-        
+
         if (owner != 0)
             form.ShowDialog(new OwnerWindow(owner));
         else Application.Run(form);

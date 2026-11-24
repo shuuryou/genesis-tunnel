@@ -176,7 +176,7 @@ Event periods are averages. The actual wait varies between half and one-and-a-ha
 | --- | ---: | --- |
 | Warp speed every | 45 s | Starts a 4.5–7.5-second acceleration with swirl, zoom or both. Warps do not begin during a sideways look or after a crash has been planned. |
 | Warp strength | 100 | Scales acceleration, extra lens angle and screen distortion. Zero leaves the timer and possible opening flash but removes the warp itself. |
-| Crash every | 150 s | Selects a nearby surface, checks the run-up, steers into it and whites out. Under the flash, the flight restarts further along the tunnel with a fresh mood. |
+| Crash every | 150 s | Selects a pipe surface a few seconds ahead and re-plans the route so that it drifts into it instead of dodging, then whites out on impact. Under the flash, the flight restarts further along the tunnel with a fresh mood. |
 | Lighting change every | 60 s | Blends fog and lamp colors over four seconds. Many changes return to the original steel blue. |
 | color range | 50 | Limits hue, saturation, brightness and haze changes. Hue range grows with the square of the slider, so middling values stay close to the original palette. |
 | Flicker | 20 | Controls brief bursts in which lamps jump between full brightness and 10–50%. Zero disables flicker. |

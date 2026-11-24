@@ -131,6 +131,7 @@ static class Program
             int pw = (int)picture.Width * scale, ph = (int)picture.Height * scale;
             if (player == null || builtFor != (pw * 100000) + ph)
             {
+                player?.Unload();
                 player = new Player(project, pw, ph, cfg.Widescreen ? Player.Aspect : picture.Width / picture.Height);
                 if (!player.ShaderOk)
                 {
@@ -301,7 +302,7 @@ static class Program
                 byte[] px = show.Picture(out int w, out int h);
                 SaveBmp(Path.Combine(dir, $"f{(int)Math.Round(next * 100):00000}.bmp"), px, w, h);
                 Look l = show.Flight.Look;
-                log.AppendLine(FormattableString.Invariant($"t {next:0.00} crashes {show.Flight.Crashes} s {show.Flight.S:0.0} fov {l.Fov:0} flash {l.Flash:0.00} swirl {l.Swirl:0.00} zoom {l.Zoom:0.00} blur {l.Blur:0.00}"));
+                log.AppendLine(FormattableString.Invariant($"t {next:0.00} crashes {show.Flight.Crashes} s {show.Flight.S:0.0} at {show.Flight.Across.X:0.00},{show.Flight.Across.Y:0.00} fov {l.Fov:0} flash {l.Flash:0.00} swirl {l.Swirl:0.00} zoom {l.Zoom:0.00} blur {l.Blur:0.00}"));
                 next += every;
             }
         }

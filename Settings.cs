@@ -83,7 +83,7 @@ sealed class Settings
     public static Settings With(string spec)
     {
         var s = new Settings();
-        
+
         if (string.IsNullOrEmpty(spec))
             return s;
 
